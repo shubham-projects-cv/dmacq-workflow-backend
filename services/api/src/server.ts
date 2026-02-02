@@ -5,6 +5,7 @@ import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
 import { WorkflowJSON, WorkflowEvent } from "shared";
+import { getTemporalClient } from "./temporalClient";
 
 const app = express();
 
@@ -63,26 +64,43 @@ app.get("/stream", (req, res) => {
 
 /* ================= PUBLISH ================= */
 
-app.post("/workflow/publish", (req, res) => {
-  const workflow: WorkflowJSON = req.body;
+app.post("/workflow/publish", async (req, res) => {
+  try {
+    const workflow: any = req.body;
 
-  const workflowId = uuidv4();
+    const workflowId = uuidv4();
 
-  console.log("Workflow published:", workflowId);
+    const temporal = await getTemporalClient();
 
-  const event: WorkflowEvent = {
-    workflowId,
-    status: "STARTED",
-    message: "Workflow started",
-    timestamp: new Date().toISOString(),
-  };
+    const handle = await temporal.workflow.start("mainWorkflow", {
+      taskQueue: "workflow-task-queue",
+      workflowId,
+      args: [],
+    });
 
-  broadcast(event);
+    console.log("Started workflow:", handle.workflowId);
 
-  res.json({
-    success: true,
-    workflowId,
-  });
+    const event: WorkflowEvent = {
+      workflowId,
+      status: "STARTED",
+      message: "Workflow started",
+      timestamp: new Date().toISOString(),
+    };
+
+    broadcast(event);
+
+    res.json({
+      success: true,
+      workflowId,
+    });
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to start workflow",
+    });
+  }
 });
 
 /* ================= START ================= */
