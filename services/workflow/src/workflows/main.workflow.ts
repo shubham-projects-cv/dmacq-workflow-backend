@@ -5,10 +5,14 @@ import {
   workflowInfo,
   sleep,
 } from "@temporalio/workflow";
-
+import type * as Events from "../activities/event.activity";
 import type * as Email from "../activities/email.activity";
 
 const { sendApprovalEmail, sendFinalEmail } = proxyActivities<typeof Email>({
+  startToCloseTimeout: "1 minute",
+});
+
+const { emitEvent } = proxyActivities<typeof Events>({
   startToCloseTimeout: "1 minute",
 });
 
@@ -21,16 +25,21 @@ export async function mainWorkflow(approver: string, user: string) {
     decision = v;
   });
 
-  // Send approval mail
   const wid = workflowInfo().workflowId;
+
+  await emitEvent(wid, "STARTED");
 
   await sendApprovalEmail(approver, wid);
 
-  // Wait
+  await emitEvent(wid, "WAITING", "Waiting for approval");
+
   while (!decision) {
     await sleep(1000);
   }
 
-  // Final mail
+  await emitEvent(wid, "DECISION", decision);
+
   await sendFinalEmail(user, decision);
+
+  await emitEvent(wid, "COMPLETED");
 }

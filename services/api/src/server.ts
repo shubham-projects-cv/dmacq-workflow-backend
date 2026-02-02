@@ -160,6 +160,23 @@ app.get("/workflow/deny", async (req, res) => {
   res.send("Denied ❌");
 });
 
+/* ================= INTERNAL EVENT ================= */
+
+app.post("/internal/event", (req, res) => {
+  const { workflowId, status, message } = req.body;
+
+  const event = {
+    workflowId,
+    status,
+    message,
+    timestamp: new Date().toISOString(),
+  };
+
+  broadcast(event);
+
+  res.json({ success: true });
+});
+
 /* ================= START ================= */
 
 app.listen(PORT, () => {
