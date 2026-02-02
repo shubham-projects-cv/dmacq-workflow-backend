@@ -1,0 +1,14 @@
+{
+  "name": "workflow-backend",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "shared"
+  ],
+  "devDependencies": {
+    "@types/node": "^25.2.0",
+    "nodemon": "^3.1.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
