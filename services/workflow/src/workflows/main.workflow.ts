@@ -1,41 +1,36 @@
-// services/workflow/src/workflows/main.workflow.ts
+import {
+  defineSignal,
+  setHandler,
+  proxyActivities,
+  workflowInfo,
+  sleep,
+} from "@temporalio/workflow";
 
-import { defineSignal, setHandler, sleep } from "@temporalio/workflow";
+import type * as Email from "../activities/email.activity";
 
-/* ================= SIGNAL ================= */
+const { sendApprovalEmail, sendFinalEmail } = proxyActivities<typeof Email>({
+  startToCloseTimeout: "1 minute",
+});
 
 export const approvalSignal = defineSignal<[string]>("approvalSignal");
 
-/* ================= WORKFLOW ================= */
-
-export async function mainWorkflow(): Promise<void> {
+export async function mainWorkflow(approver: string, user: string) {
   let decision: string | null = null;
 
-  /* Listen for signal */
-  setHandler(approvalSignal, (result: string) => {
-    decision = result;
+  setHandler(approvalSignal, (v) => {
+    decision = v;
   });
 
-  console.log("Workflow: STARTED");
+  // Send approval mail
+  const wid = workflowInfo().workflowId;
 
-  /* Simulate sending approval mail */
-  console.log("Workflow: Sending approval email");
+  await sendApprovalEmail(approver, wid);
 
-  await sleep(2000);
-
-  console.log("Workflow: WAITING FOR APPROVAL");
-
-  /* Wait until decision comes */
-  while (decision === null) {
+  // Wait
+  while (!decision) {
     await sleep(1000);
   }
 
-  console.log("Workflow: Decision =", decision);
-
-  /* Simulate final mail */
-  console.log("Workflow: Sending final email");
-
-  await sleep(2000);
-
-  console.log("Workflow: COMPLETED");
+  // Final mail
+  await sendFinalEmail(user, decision);
 }

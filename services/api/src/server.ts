@@ -9,7 +9,13 @@ import { getTemporalClient } from "./temporalClient";
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    credentials: true,
+  }),
+);
+
 app.use(express.json());
 
 const PORT = 4000;
@@ -66,28 +72,24 @@ app.get("/stream", (req, res) => {
 
 app.post("/workflow/publish", async (req, res) => {
   try {
-    const workflow: any = req.body;
+    const { approver, user } = req.body;
 
-    const workflowId = uuidv4();
+    if (!approver || !user) {
+      return res.status(400).json({
+        success: false,
+        error: "approver and user required",
+      });
+    }
 
-    const temporal = await getTemporalClient();
+    const client = await getTemporalClient();
 
-    const handle = await temporal.workflow.start("mainWorkflow", {
+    const workflowId = crypto.randomUUID();
+
+    await client.workflow.start("mainWorkflow", {
+      args: [approver, user],
       taskQueue: "workflow-task-queue",
       workflowId,
-      args: [],
     });
-
-    console.log("Started workflow:", handle.workflowId);
-
-    const event: WorkflowEvent = {
-      workflowId,
-      status: "STARTED",
-      message: "Workflow started",
-      timestamp: new Date().toISOString(),
-    };
-
-    broadcast(event);
 
     res.json({
       success: true,
@@ -98,7 +100,6 @@ app.post("/workflow/publish", async (req, res) => {
 
     res.status(500).json({
       success: false,
-      error: "Failed to start workflow",
     });
   }
 });
@@ -135,6 +136,28 @@ app.post("/workflow/respond", async (req, res) => {
       error: "Failed to signal workflow",
     });
   }
+});
+
+app.get("/workflow/approve", async (req, res) => {
+  const wid = req.query.wid as string;
+
+  const temporal = await getTemporalClient();
+  const h = temporal.workflow.getHandle(wid);
+
+  await h.signal("approvalSignal", "approve");
+
+  res.send("Approved ✅");
+});
+
+app.get("/workflow/deny", async (req, res) => {
+  const wid = req.query.wid as string;
+
+  const temporal = await getTemporalClient();
+  const h = temporal.workflow.getHandle(wid);
+
+  await h.signal("approvalSignal", "deny");
+
+  res.send("Denied ❌");
 });
 
 /* ================= START ================= */
