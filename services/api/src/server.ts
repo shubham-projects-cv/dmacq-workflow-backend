@@ -103,6 +103,40 @@ app.post("/workflow/publish", async (req, res) => {
   }
 });
 
+/* ================= APPROVE / DENY ================= */
+
+app.post("/workflow/respond", async (req, res) => {
+  try {
+    const { workflowId, result } = req.body;
+
+    if (!workflowId || !result) {
+      return res.status(400).json({
+        success: false,
+        error: "workflowId and result required",
+      });
+    }
+
+    const temporal = await getTemporalClient();
+
+    const handle = temporal.workflow.getHandle(workflowId);
+
+    await handle.signal("approvalSignal", result);
+
+    console.log("Signal sent:", workflowId, result);
+
+    res.json({
+      success: true,
+    });
+  } catch (err) {
+    console.error(err);
+
+    res.status(500).json({
+      success: false,
+      error: "Failed to signal workflow",
+    });
+  }
+});
+
 /* ================= START ================= */
 
 app.listen(PORT, () => {
