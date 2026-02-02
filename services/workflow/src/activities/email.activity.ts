@@ -1,30 +1,85 @@
 import axios from "axios";
 
-export async function sendApprovalEmail(to: string, workflowId: string) {
-  const approveUrl = `http://localhost:4000/workflow/approve?wid=${workflowId}`;
-  const denyUrl = `http://localhost:4000/workflow/deny?wid=${workflowId}`;
+/* ================= TYPES ================= */
 
+type ApprovalEmailPayload = {
+  to: string;
+  approveUser: string;
+  denyUser: string;
+  workflowId: string;
+  subject: string;
+  html: string;
+};
+
+type FinalEmailPayload = {
+  to: string;
+  subject: string;
+  html: string;
+};
+
+/* ================= CONFIG ================= */
+
+const EMAIL_SERVICE_URL = "http://localhost:5000/send";
+
+/* ================= APPROVAL ================= */
+
+export async function sendApprovalEmail(
+  approver: string,
+  approveUser: string,
+  denyUser: string,
+  workflowId: string,
+): Promise<void> {
   const html = `
     <h2>Approval Needed</h2>
+
     <p>Please choose:</p>
-    <a href="${approveUrl}">✅ Approve</a>
+
+    <a href="http://localhost:4000/workflow/approve?wid=${workflowId}">
+      ✅ Approve
+    </a>
+
     <br/><br/>
-    <a href="${denyUrl}">❌ Deny</a>
+
+    <a href="http://localhost:4000/workflow/deny?wid=${workflowId}">
+      ❌ Deny
+    </a>
+
+    <hr/>
+
+    <p>If approved → ${approveUser}</p>
+    <p>If denied → ${denyUser}</p>
   `;
 
-  console.log("ACTIVITY → sending to:", to); // ADD THIS
+  const payload: ApprovalEmailPayload = {
+    to: approver,
+    approveUser,
+    denyUser,
+    workflowId,
 
-  await axios.post("http://localhost:5000/send", {
-    to, // ← MUST BE HERE
-    subject: "Workflow Approval",
+    subject: "Workflow Approval Required",
     html,
-  });
+  };
+
+  await axios.post(EMAIL_SERVICE_URL, payload);
 }
 
-export async function sendFinalEmail(to: string, result: string) {
-  await axios.post("http://localhost:5000/send", {
+/* ================= FINAL ================= */
+
+export async function sendFinalEmail(
+  to: string,
+  result: string,
+): Promise<void> {
+  const html = `
+    <h2>Workflow ${result}</h2>
+
+    <p>Your workflow was ${result}.</p>
+  `;
+
+  const payload: FinalEmailPayload = {
     to,
     subject: "Workflow Result",
-    html: `<h2>Workflow ${result}</h2>`,
-  });
+    html,
+  };
+
+  await axios.post(EMAIL_SERVICE_URL, payload);
 }

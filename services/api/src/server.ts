@@ -1,13 +1,13 @@
-// services/api/src/server.ts
-
 import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
 
-import { WorkflowJSON, WorkflowEvent } from "shared";
+import { WorkflowEvent } from "shared";
 import { getTemporalClient } from "./temporalClient";
 
 const app = express();
+
+/* ================= CONFIG ================= */
 
 app.use(
   cors({
@@ -20,7 +20,30 @@ app.use(express.json());
 
 const PORT = 4000;
 
-/* ================= SSE CLIENTS ================= */
+/* ================= TYPES ================= */
+
+type WorkflowNode = {
+  id: string;
+  type: string;
+  data?: {
+    email?: string;
+  };
+};
+
+type WorkflowEdge = {
+  source: string;
+  target: string;
+  data?: {
+    condition?: "approve" | "deny";
+  };
+};
+
+type WorkflowPayload = {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+};
+
+/* ================= SSE ================= */
 
 type Client = {
   id: string;
@@ -31,11 +54,11 @@ const clients: Client[] = [];
 
 /* ================= BROADCAST ================= */
 
-function broadcast(event: WorkflowEvent) {
+function broadcast(event: WorkflowEvent): void {
   const data = `data: ${JSON.stringify(event)}\n\n`;
 
-  clients.forEach((client) => {
-    client.res.write(data);
+  clients.forEach((c) => {
+    c.res.write(data);
   });
 }
 
@@ -48,23 +71,21 @@ app.get("/stream", (req, res) => {
 
   res.flushHeaders();
 
-  const clientId = uuidv4();
+  const id = uuidv4();
 
-  const client: Client = {
-    id: clientId,
+  clients.push({
+    id,
     res,
-  };
+  });
 
-  clients.push(client);
-
-  console.log("Client connected:", clientId);
+  console.log("SSE Connected:", id);
 
   req.on("close", () => {
-    console.log("Client disconnected:", clientId);
+    const i = clients.findIndex((c) => c.id === id);
 
-    const index = clients.findIndex((c) => c.id === clientId);
+    if (i !== -1) clients.splice(i, 1);
 
-    if (index !== -1) clients.splice(index, 1);
+    console.log("SSE Disconnected:", id);
   });
 });
 
@@ -72,39 +93,93 @@ app.get("/stream", (req, res) => {
 
 app.post("/workflow/publish", async (req, res) => {
   try {
-    const { approver, user } = req.body;
+    const payload = req.body;
 
-    if (!approver || !user) {
+    // Support both formats
+    const workflow: WorkflowPayload = payload.workflow ?? payload;
+
+    if (!workflow?.nodes || !workflow?.edges) {
       return res.status(400).json({
         success: false,
-        error: "approver and user required",
+        error: "Invalid workflow data",
       });
     }
 
-    const client = await getTemporalClient();
+    /* ---------- Approval Node ---------- */
+
+    const approvalNode = workflow.nodes.find((n) => n.type === "approval");
+
+    const approverEmail = approvalNode?.data?.email;
+
+    if (!approverEmail) {
+      return res.status(400).json({
+        success: false,
+        error: "Approval email missing",
+      });
+    }
+
+    /* ---------- Email Nodes Map ---------- */
+
+    const emailMap = new Map<string, string>();
+
+    for (const node of workflow.nodes) {
+      if (node.type === "email" && node.data?.email) {
+        emailMap.set(node.id, node.data.email);
+      }
+    }
+
+    /* ---------- Find Targets ---------- */
+
+    let approveUser = "";
+    let denyUser = "";
+
+    for (const edge of workflow.edges) {
+      if (edge.data?.condition === "approve") {
+        approveUser = emailMap.get(edge.target) ?? "";
+      }
+
+      if (edge.data?.condition === "deny") {
+        denyUser = emailMap.get(edge.target) ?? "";
+      }
+    }
+
+    if (!approveUser || !denyUser) {
+      return res.status(400).json({
+        success: false,
+        error: "Approve/Deny emails missing",
+      });
+    }
+
+    /* ---------- Start Temporal ---------- */
+
+    const temporal = await getTemporalClient();
 
     const workflowId = crypto.randomUUID();
 
-    await client.workflow.start("mainWorkflow", {
-      args: [approver, user],
+    await temporal.workflow.start("mainWorkflow", {
       taskQueue: "workflow-task-queue",
       workflowId,
+
+      args: [approverEmail, approveUser, denyUser],
     });
 
-    res.json({
+    console.log("Workflow started:", workflowId);
+
+    return res.json({
       success: true,
       workflowId,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Publish error:", err);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
+      error: "Failed to publish workflow",
     });
   }
 });
 
-/* ================= APPROVE / DENY ================= */
+/* ================= RESPOND ================= */
 
 app.post("/workflow/respond", async (req, res) => {
   try {
@@ -123,25 +198,26 @@ app.post("/workflow/respond", async (req, res) => {
 
     await handle.signal("approvalSignal", result);
 
-    console.log("Signal sent:", workflowId, result);
+    console.log("Signal:", workflowId, result);
 
-    res.json({
-      success: true,
-    });
+    return res.json({ success: true });
   } catch (err) {
     console.error(err);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      error: "Failed to signal workflow",
+      error: "Signal failed",
     });
   }
 });
+
+/* ================= EMAIL LINKS ================= */
 
 app.get("/workflow/approve", async (req, res) => {
   const wid = req.query.wid as string;
 
   const temporal = await getTemporalClient();
+
   const h = temporal.workflow.getHandle(wid);
 
   await h.signal("approvalSignal", "approve");
@@ -153,6 +229,7 @@ app.get("/workflow/deny", async (req, res) => {
   const wid = req.query.wid as string;
 
   const temporal = await getTemporalClient();
+
   const h = temporal.workflow.getHandle(wid);
 
   await h.signal("approvalSignal", "deny");
@@ -165,7 +242,7 @@ app.get("/workflow/deny", async (req, res) => {
 app.post("/internal/event", (req, res) => {
   const { workflowId, status, message } = req.body;
 
-  const event = {
+  const event: WorkflowEvent = {
     workflowId,
     status,
     message,
