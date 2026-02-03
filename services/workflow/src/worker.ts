@@ -1,6 +1,5 @@
-// services/workflow/src/worker.ts
+import { Worker, NativeConnection } from "@temporalio/worker";
 
-import { NativeConnection, Worker } from "@temporalio/worker";
 import * as emailActivities from "./activities/email.activity";
 import * as workflows from "./workflows";
 import * as eventActivities from "./activities/event.activity";
@@ -12,15 +11,18 @@ async function run() {
 
   const worker = await Worker.create({
     connection,
+
     workflowsPath: require.resolve("./workflows"),
+
     activities: {
       ...emailActivities,
       ...eventActivities,
     },
+
     taskQueue: "workflow-task-queue",
   });
 
-  console.log("Temporal worker started");
+  console.log("Worker started");
 
   await worker.run();
 }
