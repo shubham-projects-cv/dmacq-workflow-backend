@@ -138,12 +138,13 @@ app.get("/workflow/deny", async (req, res) => {
 /* ================= EVENTS ================= */
 
 app.post("/internal/event", (req, res) => {
-  const { workflowId, status, message } = req.body;
+  const { workflowId, status, message, meta } = req.body;
 
   broadcast({
     workflowId,
     status,
     message,
+    meta,
     timestamp: new Date().toISOString(),
   });
 

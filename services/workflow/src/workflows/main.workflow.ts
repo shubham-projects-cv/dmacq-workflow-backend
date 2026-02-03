@@ -21,9 +21,6 @@ const { emitEvent } = proxyActivities<typeof Events>({
 
 /* ================= SIGNAL ================= */
 
-/**
- * Approval signal can ONLY be "approve" or "deny"
- */
 export const approvalSignal =
   defineSignal<["approve" | "deny"]>("approvalSignal");
 
@@ -86,8 +83,6 @@ function resolveTargetEmail(
 /* ================= WORKFLOW ================= */
 
 export async function mainWorkflow(workflow: WorkflowJSON) {
-  /* ---------- Decision State ---------- */
-
   let decision: "approve" | "deny" | null = null;
 
   setHandler(approvalSignal, (v) => {
@@ -112,37 +107,44 @@ export async function mainWorkflow(workflow: WorkflowJSON) {
 
   /* ---------- SEND APPROVAL EMAIL ---------- */
 
+  await emitEvent(wid, "EMAIL_SENT", "approval", {
+    to: approver,
+  });
+
   await sendApprovalEmail(approver, "Approve Path", "Deny Path", wid);
 
   await emitEvent(wid, "WAITING");
 
-  /* ---------- WAIT FOR SIGNAL (NO POLLING) ---------- */
+  /* ---------- WAIT ---------- */
 
   await condition(() => decision !== null);
 
-  if (decision === null) {
-    throw new Error("Decision not received");
+  if (!decision) {
+    throw new Error("Decision missing");
   }
 
   /* ---------- DECISION ---------- */
 
   await emitEvent(wid, "DECISION", decision);
 
-  /* ---------- RESOLVE TARGET EMAIL ---------- */
+  /* ---------- RESOLVE USER ---------- */
 
   const targetEmail = resolveTargetEmail(workflow, decision);
 
   if (!targetEmail) {
-    throw new Error("Target email not found");
+    throw new Error("Target email missing");
   }
 
   /* ---------- FINAL EMAIL ---------- */
 
-  if (decision === "approve") {
-    await sendFinalEmail(targetEmail, "approved");
-  } else {
-    await sendFinalEmail(targetEmail, "denied");
-  }
+  await emitEvent(wid, "EMAIL_SENT", "final", {
+    to: targetEmail,
+  });
+
+  await sendFinalEmail(
+    targetEmail,
+    decision === "approve" ? "approved" : "denied",
+  );
 
   /* ---------- COMPLETE ---------- */
 
