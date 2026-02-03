@@ -5,7 +5,7 @@ export async function emitEvent(
   status: string,
   message?: string,
 ) {
-  await axios.post("http://localhost:4000/internal/event", {
+  await axios.post("http://api:4000/internal/event", {
     workflowId,
     status,
     message,

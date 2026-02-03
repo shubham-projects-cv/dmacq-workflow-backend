@@ -1,12 +1,17 @@
 // services/workflow/src/worker.ts
 
-import { Worker } from "@temporalio/worker";
+import { NativeConnection, Worker } from "@temporalio/worker";
 import * as emailActivities from "./activities/email.activity";
 import * as workflows from "./workflows";
 import * as eventActivities from "./activities/event.activity";
 
 async function run() {
+  const connection = await NativeConnection.connect({
+    address: process.env.TEMPORAL_ADDRESS || "temporal:7233",
+  });
+
   const worker = await Worker.create({
+    connection,
     workflowsPath: require.resolve("./workflows"),
     activities: {
       ...emailActivities,

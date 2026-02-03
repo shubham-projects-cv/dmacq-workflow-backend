@@ -13,6 +13,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+
   temporal:
     image: temporalio/auto-setup:1.25
     container_name: temporal-server
@@ -28,6 +29,7 @@ services:
       - "7233:7233"
     restart: always
 
+
   temporal-ui:
     image: temporalio/ui:latest
     container_name: temporal-ui
@@ -37,7 +39,43 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
     ports:
       - "8088:8080"
-    restart: always
+
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: workflow-api
+    depends_on:
+      - temporal
+    ports:
+      - "4000:4000"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+
+
+  email:
+    build:
+      context: .
+      dockerfile: services/email/Dockerfile
+    container_name: workflow-email
+    ports:
+      - "5000:5000"
+    env_file:
+      - services/email/.env
+
+
+  workflow:
+    build:
+      context: .
+      dockerfile: services/workflow/Dockerfile
+    container_name: workflow-worker
+    depends_on:
+      - temporal
+      - api
+      - email
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
 
 
 volumes:

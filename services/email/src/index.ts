@@ -1,11 +1,12 @@
 import "dotenv/config";
 import express from "express";
 import { sendMail } from "./mailer";
+import { Request, Response } from "express";
 
 const app = express();
 app.use(express.json());
 
-app.post("/send", async (req, res) => {
+app.post("/send", async (req: Request, res: Response) => {
   console.log("EMAIL REQUEST BODY:", req.body);
 
   const { to, subject, html } = req.body;

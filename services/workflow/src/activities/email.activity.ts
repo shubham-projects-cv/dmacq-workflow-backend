@@ -19,7 +19,7 @@ type FinalEmailPayload = {
 
 /* ================= CONFIG ================= */
 
-const EMAIL_SERVICE_URL = "http://localhost:5000/send";
+const EMAIL_SERVICE_URL = "http://email:5000/send";
 
 /* ================= APPROVAL ================= */
 
