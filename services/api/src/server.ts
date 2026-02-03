@@ -1,13 +1,14 @@
 import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
+import SHA256 from "crypto-js/sha256";
 
 import { WorkflowEvent } from "shared";
 import { getTemporalClient } from "./temporalClient";
 
-const app = express();
+/* ================= APP ================= */
 
-/* ================= CONFIG ================= */
+const app = express();
 
 app.use(
   cors({
@@ -42,6 +43,14 @@ type WorkflowPayload = {
   nodes: WorkflowNode[];
   edges: WorkflowEdge[];
 };
+
+/* ================= PUBLISH CACHE ================= */
+
+const publishedHashes = new Set<string>();
+
+function createWorkflowHash(workflow: WorkflowPayload): string {
+  return SHA256(JSON.stringify(workflow)).toString();
+}
 
 /* ================= SSE ================= */
 
@@ -78,14 +87,14 @@ app.get("/stream", (req, res) => {
     res,
   });
 
-  console.log("SSE Connected:", id);
+  console.log("SSE connected:", id);
 
   req.on("close", () => {
-    const i = clients.findIndex((c) => c.id === id);
+    const index = clients.findIndex((c) => c.id === id);
 
-    if (i !== -1) clients.splice(i, 1);
+    if (index !== -1) clients.splice(index, 1);
 
-    console.log("SSE Disconnected:", id);
+    console.log("SSE disconnected:", id);
   });
 });
 
@@ -93,9 +102,10 @@ app.get("/stream", (req, res) => {
 
 app.post("/workflow/publish", async (req, res) => {
   try {
+    /* ---------- Normalize Payload ---------- */
+
     const payload = req.body;
 
-    // Support both formats
     const workflow: WorkflowPayload = payload.workflow ?? payload;
 
     if (!workflow?.nodes || !workflow?.edges) {
@@ -105,7 +115,18 @@ app.post("/workflow/publish", async (req, res) => {
       });
     }
 
-    /* ---------- Approval Node ---------- */
+    /* ---------- DUPLICATE CHECK ---------- */
+
+    const hash = createWorkflowHash(workflow);
+
+    if (publishedHashes.has(hash)) {
+      return res.status(409).json({
+        success: false,
+        error: "Workflow already published",
+      });
+    }
+
+    /* ---------- Find Approval ---------- */
 
     const approvalNode = workflow.nodes.find((n) => n.type === "approval");
 
@@ -118,7 +139,7 @@ app.post("/workflow/publish", async (req, res) => {
       });
     }
 
-    /* ---------- Email Nodes Map ---------- */
+    /* ---------- Email Map ---------- */
 
     const emailMap = new Map<string, string>();
 
@@ -163,6 +184,10 @@ app.post("/workflow/publish", async (req, res) => {
       args: [approverEmail, approveUser, denyUser],
     });
 
+    /* ---------- Save Hash ---------- */
+
+    publishedHashes.add(hash);
+
     console.log("Workflow started:", workflowId);
 
     return res.json({
@@ -198,7 +223,7 @@ app.post("/workflow/respond", async (req, res) => {
 
     await handle.signal("approvalSignal", result);
 
-    console.log("Signal:", workflowId, result);
+    console.log("Signal sent:", workflowId, result);
 
     return res.json({ success: true });
   } catch (err) {
