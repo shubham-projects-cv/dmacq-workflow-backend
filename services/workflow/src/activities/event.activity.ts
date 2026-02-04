@@ -2,11 +2,21 @@ import axios from "axios";
 
 /* ================= Types ================= */
 
+type EventMeta = {
+  to?: string;
+
+  currentApproverId?: string | null;
+  currentEdgeId?: string | null;
+
+  completedApproverIds?: string[];
+  completedEdgeIds?: string[];
+};
+
 type EventPayload = {
   workflowId: string;
   status: string;
   message?: string;
-  meta?: Record<string, string>;
+  meta?: EventMeta;
 };
 
 /* ================= Emit ================= */
@@ -15,7 +25,7 @@ export async function emitEvent(
   workflowId: string,
   status: string,
   message?: string,
-  meta?: Record<string, string>,
+  meta?: EventMeta,
 ): Promise<void> {
   const payload: EventPayload = {
     workflowId,

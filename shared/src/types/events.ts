@@ -6,6 +6,7 @@ export type WorkflowStatus =
   | "DECISION"
   | "EMAIL_SENT"
   | "COMPLETED"
+  | "DENIED"
   | "FAILED";
 
 export type WorkflowEvent = {
@@ -13,9 +14,10 @@ export type WorkflowEvent = {
   status: WorkflowStatus;
   message?: string;
 
-  // ✅ Added
   meta?: {
     to?: string;
+    approverId?: string;
+    level?: number;
   };
 
   timestamp: string;

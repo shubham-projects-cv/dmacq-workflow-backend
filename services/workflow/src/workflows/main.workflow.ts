@@ -35,6 +35,7 @@ type Node = {
 };
 
 type Edge = {
+  id?: string;
   source: string;
   target: string;
   data?: {
@@ -49,35 +50,24 @@ type WorkflowJSON = {
 
 /* ================= HELPERS ================= */
 
-function getEmailMap(nodes: Node[]) {
-  const map = new Map<string, string>();
-
-  for (const n of nodes) {
-    if (n.type === "email" && n.data?.email) {
-      map.set(n.id, n.data.email);
-    }
-  }
-
-  return map;
+function findNode(nodes: Node[], id: string) {
+  return nodes.find((n) => n.id === id);
 }
 
-function findApprovalNode(nodes: Node[]) {
-  return nodes.find((n) => n.type === "approval");
+function findStart(nodes: Node[]) {
+  return nodes.find((n) => n.type === "start");
 }
 
-function resolveTargetEmail(
-  workflow: WorkflowJSON,
-  condition: "approve" | "deny",
+function findDefaultEdge(edges: Edge[], from: string) {
+  return edges.find((e) => e.source === from && e.data?.condition == null);
+}
+
+function findDecisionEdge(
+  edges: Edge[],
+  from: string,
+  decision: "approve" | "deny",
 ) {
-  const emailMap = getEmailMap(workflow.nodes);
-
-  for (const e of workflow.edges) {
-    if (e.data?.condition === condition) {
-      return emailMap.get(e.target);
-    }
-  }
-
-  return null;
+  return edges.find((e) => e.source === from && e.data?.condition === decision);
 }
 
 /* ================= WORKFLOW ================= */
@@ -91,62 +81,130 @@ export async function mainWorkflow(workflow: WorkflowJSON) {
 
   const wid = workflowInfo().workflowId;
 
-  /* ---------- START ---------- */
+  /* ================= STATE ================= */
+
+  const completedApproverIds: string[] = [];
+  const completedEdgeIds: string[] = [];
+
+  let currentApproverId: string | null = null;
+  let currentEdgeId: string | null = null;
+
+  /* ================= START ================= */
 
   await emitEvent(wid, "STARTED");
 
-  /* ---------- FIND APPROVER ---------- */
+  const start = findStart(workflow.nodes);
 
-  const approvalNode = findApprovalNode(workflow.nodes);
+  if (!start) throw new Error("Start node missing");
 
-  const approver = approvalNode?.data?.email;
+  let currentNodeId = start.id;
 
-  if (!approver) {
-    throw new Error("Approval email missing");
+  /* ================= LOOP ================= */
+
+  while (true) {
+    const currentNode = findNode(workflow.nodes, currentNodeId);
+
+    if (!currentNode) break;
+
+    /* ---------- APPROVAL ---------- */
+
+    if (currentNode.type === "approval") {
+      const approver = currentNode.data?.email;
+
+      if (!approver) throw new Error("Approval email missing");
+
+      currentApproverId = currentNode.id;
+
+      await emitEvent(wid, "WAITING", undefined, {
+        currentApproverId,
+        currentEdgeId,
+        completedApproverIds,
+        completedEdgeIds,
+      });
+
+      await sendApprovalEmail(approver, "Approve Path", "Deny Path", wid);
+
+      decision = null;
+
+      await condition(() => decision !== null);
+
+      if (!decision) throw new Error("Decision missing");
+
+      completedApproverIds.push(currentNode.id);
+
+      const decisionEdge = findDecisionEdge(
+        workflow.edges,
+        currentNode.id,
+        decision,
+      );
+
+      if (!decisionEdge) break;
+
+      if (decisionEdge.id) {
+        completedEdgeIds.push(decisionEdge.id);
+      }
+
+      currentEdgeId = decisionEdge.id ?? null;
+
+      await emitEvent(wid, "DECISION", decision, {
+        currentApproverId,
+        currentEdgeId,
+        completedApproverIds,
+        completedEdgeIds,
+      });
+
+      currentNodeId = decisionEdge.target;
+
+      continue;
+    }
+
+    /* ---------- NORMAL FLOW ---------- */
+
+    const nextEdge = findDefaultEdge(workflow.edges, currentNodeId);
+
+    if (!nextEdge) break;
+
+    if (nextEdge.id) {
+      completedEdgeIds.push(nextEdge.id);
+    }
+
+    currentEdgeId = nextEdge.id ?? null;
+
+    const nextNode = findNode(workflow.nodes, nextEdge.target);
+
+    if (!nextNode) break;
+
+    /* ---------- EMAIL ---------- */
+
+    if (nextNode.type === "email") {
+      const to = nextNode.data?.email;
+
+      if (!to) throw new Error("Email missing");
+
+      await emitEvent(wid, "EMAIL_SENT", "final", {
+        to,
+        completedApproverIds,
+        completedEdgeIds,
+      });
+
+      await sendFinalEmail(to, "completed");
+
+      currentNodeId = nextNode.id;
+
+      continue;
+    }
+
+    if (nextNode.type === "end") break;
+
+    currentNodeId = nextNode.id;
   }
 
-  /* ---------- SEND APPROVAL EMAIL ---------- */
+  /* ================= COMPLETE ================= */
 
-  await emitEvent(wid, "EMAIL_SENT", "approval", {
-    to: approver,
+  await emitEvent(wid, "COMPLETED", undefined, {
+    currentApproverId: null,
+    currentEdgeId: null,
+    completedApproverIds,
+    completedEdgeIds,
   });
-
-  await sendApprovalEmail(approver, "Approve Path", "Deny Path", wid);
-
-  await emitEvent(wid, "WAITING");
-
-  /* ---------- WAIT ---------- */
-
-  await condition(() => decision !== null);
-
-  if (!decision) {
-    throw new Error("Decision missing");
-  }
-
-  /* ---------- DECISION ---------- */
-
-  await emitEvent(wid, "DECISION", decision);
-
-  /* ---------- RESOLVE USER ---------- */
-
-  const targetEmail = resolveTargetEmail(workflow, decision);
-
-  if (!targetEmail) {
-    throw new Error("Target email missing");
-  }
-
-  /* ---------- FINAL EMAIL ---------- */
-
-  await emitEvent(wid, "EMAIL_SENT", "final", {
-    to: targetEmail,
-  });
-
-  await sendFinalEmail(
-    targetEmail,
-    decision === "approve" ? "approved" : "denied",
-  );
-
-  /* ---------- COMPLETE ---------- */
-
-  await emitEvent(wid, "COMPLETED");
 }

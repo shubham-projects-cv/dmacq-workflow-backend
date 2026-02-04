@@ -1,5 +1,3 @@
-// shared/src/types/signals.ts
-
 export type ApprovalResult = "approve" | "deny";
 
 export type ApprovalSignal = {

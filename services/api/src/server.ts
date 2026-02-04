@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
-
+import { WorkflowStatus } from "shared";
 import { WorkflowEvent } from "shared";
 import { getTemporalClient } from "./temporalClient";
 
@@ -61,9 +61,67 @@ app.post("/workflow/publish", async (req, res) => {
     if (!workflow?.nodes || !workflow?.edges) {
       return res.status(400).json({
         success: false,
-        error: "Invalid workflow",
+        error: "Invalid workflow format",
       });
     }
+
+    /* ================= VALIDATION ================= */
+
+    const nodes = workflow.nodes;
+    const edges = workflow.edges;
+
+    const startNodes = nodes.filter(
+      (n: { type: string }) => n.type === "start",
+    );
+
+    const approvalNodes = nodes.filter(
+      (n: { type: string }) => n.type === "approval",
+    );
+
+    const endNodes = nodes.filter((n: { type: string }) => n.type === "end");
+
+    if (startNodes.length !== 1) {
+      return res.status(400).json({
+        success: false,
+        error: "Workflow must have exactly one Start node",
+      });
+    }
+
+    if (approvalNodes.length < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one Approval node required",
+      });
+    }
+
+    if (endNodes.length !== 1) {
+      return res.status(400).json({
+        success: false,
+        error: "Workflow must have exactly one End node",
+      });
+    }
+
+    for (const n of approvalNodes) {
+      if (!n.data?.email) {
+        return res.status(400).json({
+          success: false,
+          error: `Approval node "${n.id}" missing email`,
+        });
+      }
+    }
+
+    for (const e of edges) {
+      if (e.data?.condition) {
+        if (e.data.condition !== "approve" && e.data.condition !== "deny") {
+          return res.status(400).json({
+            success: false,
+            error: "Invalid edge condition",
+          });
+        }
+      }
+    }
+
+    /* ================= START WORKFLOW ================= */
 
     const temporal = await getTemporalClient();
 
@@ -72,8 +130,6 @@ app.post("/workflow/publish", async (req, res) => {
     await temporal.workflow.start("mainWorkflow", {
       taskQueue: "workflow-task-queue",
       workflowId,
-
-      // ✅ Send FULL workflow
       args: [workflow],
     });
 
@@ -138,7 +194,28 @@ app.get("/workflow/deny", async (req, res) => {
 /* ================= EVENTS ================= */
 
 app.post("/internal/event", (req, res) => {
-  const { workflowId, status, message, meta } = req.body;
+  const {
+    workflowId,
+    status,
+    message,
+    meta,
+  }: {
+    workflowId: string;
+    status: WorkflowStatus; // ✅ FIX
+    message?: string;
+    meta?: {
+      to?: string;
+      approverId?: string;
+      level?: number;
+    };
+  } = req.body;
+
+  if (!workflowId || !status) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid event payload",
+    });
+  }
 
   broadcast({
     workflowId,
