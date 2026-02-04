@@ -224,7 +224,7 @@ CMD ["npm", "run", "--workspace=services/api", "dev"]
 import express from "express";
 import cors from "cors";
 import { v4 as uuidv4 } from "uuid";
-
+import { WorkflowStatus } from "shared";
 import { WorkflowEvent } from "shared";
 import { getTemporalClient } from "./temporalClient";
 
@@ -284,9 +284,67 @@ app.post("/workflow/publish", async (req, res) => {
     if (!workflow?.nodes || !workflow?.edges) {
       return res.status(400).json({
         success: false,
-        error: "Invalid workflow",
+        error: "Invalid workflow format",
       });
     }
+
+    /* ================= VALIDATION ================= */
+
+    const nodes = workflow.nodes;
+    const edges = workflow.edges;
+
+    const startNodes = nodes.filter(
+      (n: { type: string }) => n.type === "start",
+    );
+
+    const approvalNodes = nodes.filter(
+      (n: { type: string }) => n.type === "approval",
+    );
+
+    const endNodes = nodes.filter((n: { type: string }) => n.type === "end");
+
+    if (startNodes.length !== 1) {
+      return res.status(400).json({
+        success: false,
+        error: "Workflow must have exactly one Start node",
+      });
+    }
+
+    if (approvalNodes.length < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one Approval node required",
+      });
+    }
+
+    if (endNodes.length !== 1) {
+      return res.status(400).json({
+        success: false,
+        error: "Workflow must have exactly one End node",
+      });
+    }
+
+    for (const n of approvalNodes) {
+      if (!n.data?.email) {
+        return res.status(400).json({
+          success: false,
+          error: `Approval node "${n.id}" missing email`,
+        });
+      }
+    }
+
+    for (const e of edges) {
+      if (e.data?.condition) {
+        if (e.data.condition !== "approve" && e.data.condition !== "deny") {
+          return res.status(400).json({
+            success: false,
+            error: "Invalid edge condition",
+          });
+        }
+      }
+    }
+
+    /* ================= START WORKFLOW ================= */
 
     const temporal = await getTemporalClient();
 
@@ -295,8 +353,6 @@ app.post("/workflow/publish", async (req, res) => {
     await temporal.workflow.start("mainWorkflow", {
       taskQueue: "workflow-task-queue",
       workflowId,
-
-      // ✅ Send FULL workflow
       args: [workflow],
     });
 
@@ -361,7 +417,28 @@ app.get("/workflow/deny", async (req, res) => {
 /* ================= EVENTS ================= */
 
 app.post("/internal/event", (req, res) => {
-  const { workflowId, status, message, meta } = req.body;
+  const {
+    workflowId,
+    status,
+    message,
+    meta,
+  }: {
+    workflowId: string;
+    status: WorkflowStatus; // ✅ FIX
+    message?: string;
+    meta?: {
+      to?: string;
+      approverId?: string;
+      level?: number;
+    };
+  } = req.body;
+
+  if (!workflowId || !status) {
+    return res.status(400).json({
+      success: false,
+      error: "Invalid event payload",
+    });
+  }
 
   broadcast({
     workflowId,
@@ -692,11 +769,25 @@ import axios from "axios";
 
 /* ================= Types ================= */
 
+type EventMeta = {
+  to?: string;
+
+  currentApproverId?: string | null;
+  currentEdgeId?: string | null;
+
+  completedApproverIds?: string[];
+  completedEdgeIds?: string[];
+
+  // ✅ Timing support
+  waitStartedAt?: string;
+  waitDurations?: Record<string, number>;
+};
+
 type EventPayload = {
   workflowId: string;
   status: string;
   message?: string;
-  meta?: Record<string, string>;
+  meta?: EventMeta;
 };
 
 /* ================= Emit ================= */
@@ -705,7 +796,7 @@ export async function emitEvent(
   workflowId: string,
   status: string,
   message?: string,
-  meta?: Record<string, string>,
+  meta?: EventMeta,
 ): Promise<void> {
   const payload: EventPayload = {
     workflowId,
@@ -716,6 +807,12 @@ export async function emitEvent(
 
   await axios.post("http://api:4000/internal/event", payload);
 }
+
+### ./services/workflow/src/types.ts
+----------------
+import { WorkflowJSON } from "shared";
+
+export type BackendWorkflow = WorkflowJSON;
 
 ### ./services/workflow/src/worker.ts
 ----------------
@@ -796,6 +893,7 @@ type Node = {
 };
 
 type Edge = {
+  id: string; // ✅ FIX: added id
   source: string;
   target: string;
   data?: {
@@ -810,35 +908,18 @@ type WorkflowJSON = {
 
 /* ================= HELPERS ================= */
 
-function getEmailMap(nodes: Node[]) {
-  const map = new Map<string, string>();
-
-  for (const n of nodes) {
-    if (n.type === "email" && n.data?.email) {
-      map.set(n.id, n.data.email);
-    }
-  }
-
-  return map;
+function findStartNode(nodes: Node[]) {
+  return nodes.find((n) => n.type === "start");
 }
 
-function findApprovalNode(nodes: Node[]) {
-  return nodes.find((n) => n.type === "approval");
-}
-
-function resolveTargetEmail(
-  workflow: WorkflowJSON,
+function findNextEdge(
+  edges: Edge[],
+  fromId: string,
   condition: "approve" | "deny",
 ) {
-  const emailMap = getEmailMap(workflow.nodes);
-
-  for (const e of workflow.edges) {
-    if (e.data?.condition === condition) {
-      return emailMap.get(e.target);
-    }
-  }
-
-  return null;
+  return edges.find(
+    (e) => e.source === fromId && e.data?.condition === condition,
+  );
 }
 
 /* ================= WORKFLOW ================= */
@@ -852,64 +933,142 @@ export async function mainWorkflow(workflow: WorkflowJSON) {
 
   const wid = workflowInfo().workflowId;
 
+  const completedApproverIds: string[] = [];
+  const completedEdgeIds: string[] = [];
+
+  // ✅ Track waiting times
+  const waitStartedAt: Record<string, string> = {};
+  const waitDurations: Record<string, number> = {};
+
   /* ---------- START ---------- */
 
   await emitEvent(wid, "STARTED");
 
-  /* ---------- FIND APPROVER ---------- */
+  const startNode = findStartNode(workflow.nodes);
 
-  const approvalNode = findApprovalNode(workflow.nodes);
-
-  const approver = approvalNode?.data?.email;
-
-  if (!approver) {
-    throw new Error("Approval email missing");
+  if (!startNode) {
+    throw new Error("Start node missing");
   }
 
-  /* ---------- SEND APPROVAL EMAIL ---------- */
-
-  await emitEvent(wid, "EMAIL_SENT", "approval", {
-    to: approver,
-  });
-
-  await sendApprovalEmail(approver, "Approve Path", "Deny Path", wid);
-
-  await emitEvent(wid, "WAITING");
-
-  /* ---------- WAIT ---------- */
-
-  await condition(() => decision !== null);
-
-  if (!decision) {
-    throw new Error("Decision missing");
-  }
-
-  /* ---------- DECISION ---------- */
-
-  await emitEvent(wid, "DECISION", decision);
-
-  /* ---------- RESOLVE USER ---------- */
-
-  const targetEmail = resolveTargetEmail(workflow, decision);
-
-  if (!targetEmail) {
-    throw new Error("Target email missing");
-  }
-
-  /* ---------- FINAL EMAIL ---------- */
-
-  await emitEvent(wid, "EMAIL_SENT", "final", {
-    to: targetEmail,
-  });
-
-  await sendFinalEmail(
-    targetEmail,
-    decision === "approve" ? "approved" : "denied",
+  let currentNode = workflow.nodes.find(
+    (n) =>
+      n.id === workflow.edges.find((e) => e.source === startNode.id)?.target,
   );
+
+  if (!currentNode || currentNode.type !== "approval") {
+    throw new Error("First approval missing");
+  }
+
+  /* ---------- LOOP ---------- */
+
+  while (currentNode && currentNode.type === "approval") {
+    const approverEmail = currentNode.data?.email;
+
+    if (!approverEmail) {
+      throw new Error("Approval email missing");
+    }
+
+    /* ---- Send Approval Email ---- */
+
+    await emitEvent(wid, "EMAIL_SENT", "approval", {
+      to: approverEmail,
+    });
+
+    await sendApprovalEmail(approverEmail, "Approve Path", "Deny Path", wid);
+
+    /* ---- WAITING ---- */
+
+    const waitStart = new Date().toISOString();
+
+    waitStartedAt[currentNode.id] = waitStart;
+
+    await emitEvent(wid, "WAITING", undefined, {
+      to: approverEmail,
+      currentApproverId: currentNode.id,
+      waitStartedAt: waitStart,
+    });
+
+    decision = null;
+
+    await condition(() => decision !== null);
+
+    if (!decision) {
+      throw new Error("Decision missing");
+    }
+
+    /* ---- Calculate Wait Time ---- */
+
+    const waitEnd = Date.now();
+    const start = new Date(waitStartedAt[currentNode.id]).getTime();
+
+    waitDurations[currentNode.id] = waitEnd - start;
+
+    /* ---- DECISION ---- */
+
+    const edge = findNextEdge(workflow.edges, currentNode.id, decision);
+
+    if (!edge) {
+      throw new Error("Decision edge missing");
+    }
+
+    completedApproverIds.push(currentNode.id);
+    completedEdgeIds.push(edge.id);
+
+    await emitEvent(wid, "DECISION", decision, {
+      currentEdgeId: edge.id,
+      completedApproverIds,
+      completedEdgeIds,
+      waitDurations,
+    });
+
+    /* ---- NEXT NODE ---- */
+
+    const nextNode = workflow.nodes.find((n) => n.id === edge.target);
+
+    if (!nextNode) {
+      throw new Error("Next node missing");
+    }
+
+    /* ---- Continue if Approval ---- */
+
+    if (nextNode.type === "approval") {
+      currentNode = nextNode;
+      continue;
+    }
+
+    /* ---- Final Email ---- */
+
+    if (nextNode.type === "email") {
+      const finalEmail = nextNode.data?.email;
+
+      if (!finalEmail) {
+        throw new Error("Final email missing");
+      }
+
+      await emitEvent(wid, "EMAIL_SENT", "final", {
+        to: finalEmail,
+      });
+
+      await sendFinalEmail(
+        finalEmail,
+        decision === "approve" ? "approved" : "denied",
+      );
+
+      break;
+    }
+
+    throw new Error("Invalid workflow path");
+  }
 
   /* ---------- COMPLETE ---------- */
 
-  await emitEvent(wid, "COMPLETED");
+  await emitEvent(wid, "COMPLETED", undefined, {
+    currentApproverId: null,
+    currentEdgeId: null,
+    completedApproverIds,
+    completedEdgeIds,
+    waitDurations,
+  });
 }
 
 ### ./services/workflow/tsconfig.json
@@ -957,6 +1116,7 @@ export type WorkflowStatus =
   | "DECISION"
   | "EMAIL_SENT"
   | "COMPLETED"
+  | "DENIED"
   | "FAILED";
 
 export type WorkflowEvent = {
@@ -964,9 +1124,10 @@ export type WorkflowEvent = {
   status: WorkflowStatus;
   message?: string;
 
-  // ✅ Added
   meta?: {
     to?: string;
+    approverId?: string;
+    level?: number;
   };
 
   timestamp: string;
@@ -974,8 +1135,6 @@ export type WorkflowEvent = {
 
 ### ./shared/src/types/signals.ts
 ----------------
-// shared/src/types/signals.ts
-
 export type ApprovalResult = "approve" | "deny";
 
 export type ApprovalSignal = {
