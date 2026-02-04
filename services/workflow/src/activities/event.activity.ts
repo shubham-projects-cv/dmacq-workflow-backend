@@ -10,6 +10,10 @@ type EventMeta = {
 
   completedApproverIds?: string[];
   completedEdgeIds?: string[];
+
+  // ✅ Timing support
+  waitStartedAt?: string;
+  waitDurations?: Record<string, number>;
 };
 
 type EventPayload = {
